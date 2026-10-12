@@ -126,11 +126,10 @@ def webhook():
         abort(403)
 
     try:
-        update = telebot.types.Update.de_json(
-            request.get_data(as_text=True),
-            bot
-        )
-
+        
+update = telebot.types.Update.de_json(
+    request.get_data(as_text=True)
+)
         # Telegramga tez javob berib, yangilanishni alohida ishlash
         threading.Thread(
             target=bot.process_new_updates,
