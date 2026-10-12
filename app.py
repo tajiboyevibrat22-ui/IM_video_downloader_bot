@@ -6,7 +6,7 @@ from flask import Flask, request, abort
 import telebot
 import yt_dlp
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
@@ -18,10 +18,7 @@ app = Flask(__name__)
 
 @bot.message_handler(commands=["start", "help"])
 def start(message):
-    bot.reply_to(
-        message,
-        "Salom! 👋 Instagram Reels yoki video havolasini yuboring."
-    )
+    bot.reply_to(message, "Salom! 👋 Bot ishlayapti.")
 
 @bot.message_handler(content_types=["text"])
 def get_video(message):
