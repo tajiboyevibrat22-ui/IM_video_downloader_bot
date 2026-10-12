@@ -117,6 +117,7 @@ def home():
 def health():
     return "OK", 200
 
+
 # 6. Telegram webhook
 @app.post("/telegram-webhook")
 def webhook():
@@ -126,11 +127,10 @@ def webhook():
         abort(403)
 
     try:
-        
-update = telebot.types.Update.de_json(
-    request.get_data(as_text=True)
-)
-        # Telegramga tez javob berib, yangilanishni alohida ishlash
+        update = telebot.types.Update.de_json(
+            request.get_data(as_text=True)
+        )
+
         threading.Thread(
             target=bot.process_new_updates,
             args=([update],),
@@ -142,6 +142,7 @@ update = telebot.types.Update.de_json(
     except Exception:
         app.logger.exception("Webhook xatosi")
         return "Webhook error", 500
+
 
 # 7. Webhook manzilini sozlash
 if RENDER_URL:
