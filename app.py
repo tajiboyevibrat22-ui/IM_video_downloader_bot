@@ -482,7 +482,7 @@ def handle_instagram_link(message):
 
     status = bot.send_message(
         chat_id,
-        "⏳ Havola tekshirilmoqda, kuting..."
+        "⏳ Media yuklanmoqda..."
     )
 
     try:
