@@ -274,7 +274,8 @@ def download_and_send(chat_id, status_id, url):
                 "no_warnings": True,
                 "socket_timeout": 25,
                 "retries": 2,
-                "ignoreerrors": True,
+            "ignoreerrors": False,
+"verbose": True,
             }
 
             with yt_dlp.YoutubeDL(options) as ydl:
