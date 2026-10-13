@@ -191,7 +191,7 @@ def send_start_message(chat_id):
     bot.send_message(
         chat_id,
         "Salom! 👋\n\n"
-        "Instagram video, Reels, rasm va carousel havolasini yuboring.\n\n"
+        "Instagram video, Reels, havolasini yuboring.\n\n"
         "Eslatma: ayrim yopiq yoki login talab qiladigan postlar "
         "yuklanmasligi mumkin."
     )
@@ -388,53 +388,8 @@ def broadcast_message(message):
 # =========================
 
 def download_instagram(url, folder):
-    import subprocess
-    import sys
-
-    allowed = {
-        ".mp4", ".m4v", ".mov",
-        ".jpg", ".jpeg", ".png", ".webp"
-    }
-
-    # Avval gallery-dl bilan rasm va carousel yuklash
-    try:
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "gallery_dl",
-                "-D", folder,
-                url
-            ],
-            capture_output=True,
-            text=True,
-            timeout=90
-        )
-
-        logger.info("gallery-dl exit code: %s", result.returncode)
-        logger.info("gallery-dl stdout: %s", result.stdout[-3000:])
-        logger.info("gallery-dl stderr: %s", result.stderr[-3000:])
-
-    except subprocess.TimeoutExpired:
-        logger.error("gallery-dl 90 soniyada tugamadi")
-
-    except Exception:
-        logger.exception("gallery-dl xatosi")
-
-    # gallery-dl yuklagan fayllarni topish
-    files = [
-        p for p in Path(folder).rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in allowed
-        and p.stat().st_size > 0
-    ]
-
-    if files:
-        return sorted(files)
-
-    # Rasm topilmasa, yt-dlp bilan urinib ko'rish
     options = {
-        "outtmpl": os.path.join(
-            folder, "%(title).80s_%(id)s.%(ext)s"
-        ),
+        "outtmpl": os.path.join(folder, "%(title).80s_%(id)s.%(ext)s"),
         "format": "best",
         "noplaylist": False,
         "ignoreerrors": True,
@@ -445,19 +400,21 @@ def download_instagram(url, folder):
         "max_filesize": 49 * 1024 * 1024,
     }
 
-    try:
-        with YoutubeDL(options) as ydl:
-            ydl.download([url])
-    except Exception:
-        logger.exception("yt-dlp yuklash xatosi")
+    with YoutubeDL(options) as ydl:
+        ydl.download([url])
 
-    # Ikkala usuldan keyin fayllarni qayta tekshirish
-    return sorted([
-        p for p in Path(folder).rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in allowed
-        and p.stat().st_size > 0
-    ])
+    files = []
+
+    for path in Path(folder).iterdir():
+        if not path.is_file():
+            continue
+
+        if path.suffix.lower() in (
+            ".mp4", ".m4v", ".mov",
+            ".jpg", ".jpeg", ".png", ".webp"
+        ):
+            if path.stat().st_size > 0:
+                files.append(path)
 
     return sorted(files)
 
@@ -588,7 +545,7 @@ def text_handler(message):
     else:
         bot.reply_to(
             message,
-            "Instagram video, Reels, rasm yoki carousel havolasini yuboring."
+            "Instagram video, Reels havolasini yuboring."
         )
 
 
