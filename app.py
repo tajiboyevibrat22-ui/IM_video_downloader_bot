@@ -388,8 +388,53 @@ def broadcast_message(message):
 # =========================
 
 def download_instagram(url, folder):
+    import subprocess
+    import sys
+
+    allowed = {
+        ".mp4", ".m4v", ".mov",
+        ".jpg", ".jpeg", ".png", ".webp"
+    }
+
+    # Avval gallery-dl bilan rasm va carousel yuklash
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "gallery_dl",
+                "-D", folder,
+                url
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90
+        )
+
+        logger.info("gallery-dl exit code: %s", result.returncode)
+        logger.info("gallery-dl stdout: %s", result.stdout[-3000:])
+        logger.info("gallery-dl stderr: %s", result.stderr[-3000:])
+
+    except subprocess.TimeoutExpired:
+        logger.error("gallery-dl 90 soniyada tugamadi")
+
+    except Exception:
+        logger.exception("gallery-dl xatosi")
+
+    # gallery-dl yuklagan fayllarni topish
+    files = [
+        p for p in Path(folder).rglob("*")
+        if p.is_file()
+        and p.suffix.lower() in allowed
+        and p.stat().st_size > 0
+    ]
+
+    if files:
+        return sorted(files)
+
+    # Rasm topilmasa, yt-dlp bilan urinib ko'rish
     options = {
-        "outtmpl": os.path.join(folder, "%(title).80s_%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(
+            folder, "%(title).80s_%(id)s.%(ext)s"
+        ),
         "format": "best",
         "noplaylist": False,
         "ignoreerrors": True,
@@ -400,21 +445,19 @@ def download_instagram(url, folder):
         "max_filesize": 49 * 1024 * 1024,
     }
 
-    with YoutubeDL(options) as ydl:
-        ydl.download([url])
+    try:
+        with YoutubeDL(options) as ydl:
+            ydl.download([url])
+    except Exception:
+        logger.exception("yt-dlp yuklash xatosi")
 
-    files = []
-
-    for path in Path(folder).iterdir():
-        if not path.is_file():
-            continue
-
-        if path.suffix.lower() in (
-            ".mp4", ".m4v", ".mov",
-            ".jpg", ".jpeg", ".png", ".webp"
-        ):
-            if path.stat().st_size > 0:
-                files.append(path)
+    # Ikkala usuldan keyin fayllarni qayta tekshirish
+    return sorted([
+        p for p in Path(folder).rglob("*")
+        if p.is_file()
+        and p.suffix.lower() in allowed
+        and p.stat().st_size > 0
+    ])
 
     return sorted(files)
 
