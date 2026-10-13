@@ -22,7 +22,7 @@ DB_PATH = os.environ.get("DB_PATH", "/tmp/instagram_bot.db")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 db_lock = threading.Lock()
 admin_state = {}
@@ -351,10 +351,24 @@ def health():
     return "OK", 200
 
 
+
 @app.post("/telegram-webhook")
 def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         abort(403)
+    try:
+        update = telebot.types.Update.de_json(
+            request.get_data(as_text=True)
+        )
+        log.info("Telegram update qabul qilindi")
+
+        bot.process_new_updates([update])
+
+        return "OK", 200
+    except Exception:
+        log.exception("Webhook yoki xabarni qayta ishlash xatosi")
+        return "Webhook error", 500
+
 
     try:
         update = telebot.types.Update.de_json(request.get_data(as_text=True))
