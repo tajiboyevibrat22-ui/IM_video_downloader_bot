@@ -1,6 +1,7 @@
 
 import os
 import re
+import sys
 import sqlite3
 import tempfile
 import threading
@@ -25,11 +26,12 @@ log = logging.getLogger(__name__)
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 db_lock = threading.Lock()
+download_lock = threading.Semaphore(2)
 admin_state = {}
 
 MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp",
-    ".mp4", ".m4v", ".mov", ".webm",
+    ".mp4", ".m4v", ".mov", ".webm"
 }
 
 
@@ -59,8 +61,7 @@ def save_user(user_id):
 def get_users():
     with db_lock, sqlite3.connect(DB_PATH) as con:
         return [
-            row[0]
-            for row in con.execute(
+            row[0] for row in con.execute(
                 "SELECT user_id FROM users"
             ).fetchall()
         ]
@@ -120,9 +121,10 @@ def start(message):
     bot.send_message(
         message.chat.id,
         "Salom! 👋\n\n"
-        "Instagram Reels, video, rasm yoki carousel "
-        "havolasini yuboring.\n"
-        "Ochiq Story havolalarini ham sinab ko‘rishingiz mumkin."
+        "Instagram video, Reels, rasm va carousel "
+        "havolasini yuboring.\n\n"
+        "Eslatma: ayrim yopiq yoki login talab qiladigan "
+        "postlar yuklanmasligi mumkin."
     )
 
 
@@ -131,47 +133,37 @@ def start(message):
 )
 def check_sub(call):
     if is_subscribed(call.from_user.id):
-        bot.answer_callback_query(
-            call.id, "Obuna tasdiqlandi!"
-        )
+        bot.answer_callback_query(call.id, "Obuna tasdiqlandi!")
         bot.send_message(
             call.message.chat.id,
-            "Rahmat! Endi Instagram havolasini yuboring."
+            "Rahmat! Instagram havolasini yuboring."
         )
     else:
         bot.answer_callback_query(
             call.id,
-            "Obuna aniqlanmadi. Kanalga obuna bo‘ling.",
+            "Obuna aniqlanmadi.",
             show_alert=True
         )
 
 
-# ---------- ADMIN PANEL ----------
+# ---------- ADMIN ----------
 
 @bot.message_handler(commands=["admin"])
 def admin_panel(message):
     save_user(message.from_user.id)
 
     if not is_admin(message):
-        bot.reply_to(
-            message, "⛔ Bu bo‘lim faqat admin uchun."
-        )
+        bot.reply_to(message, "⛔ Faqat admin uchun.")
         return
 
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(
-        "📢 Reklama yuborish",
-        callback_data="ad_start"
+        "📢 Reklama yuborish", callback_data="ad_start"
     ))
     kb.add(types.InlineKeyboardButton(
-        "👥 Foydalanuvchilar soni",
-        callback_data="user_count"
+        "👥 Foydalanuvchilar soni", callback_data="user_count"
     ))
-    bot.send_message(
-        message.chat.id,
-        "🔐 Admin panel",
-        reply_markup=kb
-    )
+    bot.send_message(message.chat.id, "🔐 Admin panel", reply_markup=kb)
 
 
 @bot.callback_query_handler(
@@ -195,8 +187,8 @@ def admin_actions(call):
         admin_state[call.from_user.id] = "waiting_ad"
         bot.send_message(
             call.message.chat.id,
-            "Reklama xabarini yuboring. Matn, rasm yoki "
-            "video yuborishingiz mumkin.\n"
+            "Reklama xabarini yuboring.\n"
+            "Matn, rasm yoki video bo‘lishi mumkin.\n"
             "Bekor qilish: /cancel"
         )
 
@@ -219,18 +211,15 @@ def confirm_broadcast(call):
         return
 
     pending = admin_state.get(ADMIN_ID)
+
     if not isinstance(pending, dict) or pending.get("state") != "confirm":
-        bot.answer_callback_query(
-            call.id, "Reklama topilmadi."
-        )
+        bot.answer_callback_query(call.id, "Reklama topilmadi.")
         return
 
     if call.data == "ad_cancel":
         admin_state.pop(ADMIN_ID, None)
         bot.answer_callback_query(call.id, "Bekor qilindi.")
-        bot.send_message(
-            call.message.chat.id, "Reklama yuborilmadi."
-        )
+        bot.send_message(call.message.chat.id, "Reklama yuborilmadi.")
         return
 
     source_chat = pending["chat_id"]
@@ -244,20 +233,16 @@ def confirm_broadcast(call):
 
     bot.send_message(
         call.message.chat.id,
-        f"📤 {len(users)} ta foydalanuvchiga yuborish boshlandi."
+        f"📤 {len(users)} ta foydalanuvchiga yuborilmoqda."
     )
 
     for user_id in users:
         try:
-            bot.copy_message(
-                user_id, source_chat, source_message
-            )
+            bot.copy_message(user_id, source_chat, source_message)
             sent += 1
         except Exception:
             failed += 1
-            log.warning(
-                "Reklama yuborilmadi: %s", user_id
-            )
+            log.warning("Reklama yuborilmadi: %s", user_id)
 
         threading.Event().wait(0.05)
 
@@ -270,48 +255,24 @@ def confirm_broadcast(call):
 # ---------- MEDIA HELPERS ----------
 
 def find_media(folder):
-    found = []
+    paths = []
 
     for root, _, names in os.walk(folder):
         for name in names:
             path = os.path.join(root, name)
+            ext = os.path.splitext(name)[1].lower()
 
-            if not os.path.isfile(path):
-                continue
+            if (
+                ext in MEDIA_EXTENSIONS
+                and os.path.isfile(path)
+                and os.path.getsize(path) > 0
+            ):
+                paths.append(path)
 
-            if os.path.splitext(name)[1].lower() not in MEDIA_EXTENSIONS:
-                continue
-
-            if os.path.getsize(path) > 0:
-                found.append(path)
-
-    return sorted(found)
-
-
-def download_with_gallery_dl(url, folder):
-    os.makedirs(folder, exist_ok=True)
-
-    result = subprocess.run(
-        [
-            "gallery-dl",
-            "--dest", folder,
-            url,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180
-    )
-
-    if result.returncode != 0:
-        log.warning(
-            "gallery-dl xabari: %s",
-            (result.stderr or result.stdout or "")[-2500:]
-        )
-
-    return find_media(folder)
+    return sorted(paths)
 
 
-def download_with_ytdlp(url, folder):
+def download_ytdlp(url, folder):
     os.makedirs(folder, exist_ok=True)
 
     options = {
@@ -323,8 +284,8 @@ def download_with_ytdlp(url, folder):
         "max_filesize": 49 * 1024 * 1024,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": 25,
-        "retries": 2,
+        "socket_timeout": 20,
+        "retries": 1,
         "ignoreerrors": False,
     }
 
@@ -334,110 +295,131 @@ def download_with_ytdlp(url, folder):
     return find_media(folder)
 
 
-# ---------- MEDIA DOWNLOAD AND SEND ----------
+def download_gallery(url, folder):
+    os.makedirs(folder, exist_ok=True)
+
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "gallery_dl",
+            "--dest", folder,
+            "--retries", "1",
+            "--http-timeout", "15",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60
+    )
+
+    log.info("gallery-dl exit code: %s", result.returncode)
+    if result.returncode != 0:
+        log.warning(
+            "gallery-dl xatosi: %s",
+            (result.stderr or result.stdout or "")[-2000:]
+        )
+
+    return find_media(folder)
+
+
+# ---------- DOWNLOAD AND SEND ----------
 
 def download_and_send(chat_id, status_id, url):
     try:
-        with tempfile.TemporaryDirectory() as folder:
-            # Avval gallery-dl bilan rasm, carousel va media
-            try:
-                paths = download_with_gallery_dl(
-                    url, os.path.join(folder, "gallery")
-                )
-            except Exception:
-                log.exception("gallery-dl yuklash xatosi")
+        # Bir vaqtda ko‘pi bilan 2 ta yuklash
+        with download_lock:
+            with tempfile.TemporaryDirectory() as folder:
                 paths = []
 
-            # gallery-dl media topmasa, yt-dlp ni sinab ko‘rish
-            if not paths:
+                # Birinchi navbatda yt-dlp:
+                # Reels va videolar uchun asosiy usul.
                 try:
-                    paths = download_with_ytdlp(
-                        url, os.path.join(folder, "ytdlp")
+                    paths = download_ytdlp(
+                        url, os.path.join(folder, "video")
                     )
                 except Exception:
                     log.exception("yt-dlp yuklash xatosi")
-                    paths = []
 
-            if not paths:
-                raise RuntimeError(
-                    "Hech qanday qo‘llab-quvvatlanadigan "
-                    "media topilmadi."
-                )
-
-            sent = 0
-
-            for path in paths[:10]:
-                size = os.path.getsize(path)
-
-                # Telegram botlari uchun amaliy fayl chegarasi
-                if size > 49 * 1024 * 1024:
-                    log.warning("Fayl juda katta: %s", path)
-                    continue
-
-                ext = os.path.splitext(path)[1].lower()
-
-                with open(path, "rb") as media:
-                    if ext in (".jpg", ".jpeg", ".png", ".webp"):
-                        if size <= 9 * 1024 * 1024:
-                            bot.send_photo(chat_id, media)
-                        else:
-                            bot.send_document(chat_id, media)
-
-                    elif ext in (".mp4", ".m4v", ".mov"):
-                        bot.send_video(
-                            chat_id,
-                            media,
-                            supports_streaming=True,
-                            timeout=90
+                # Video usuli ishlamasa, gallery-dl:
+                # rasm va carousel uchun zaxira usul.
+                if not paths:
+                    try:
+                        paths = download_gallery(
+                            url, os.path.join(folder, "gallery")
                         )
+                    except subprocess.TimeoutExpired:
+                        log.warning("gallery-dl vaqti tugadi")
+                    except Exception:
+                        log.exception("gallery-dl yuklash xatosi")
 
-                    else:
-                        bot.send_document(
-                            chat_id, media, timeout=90
-                        )
+                if not paths:
+                    raise RuntimeError("Hech qanday media topilmadi.")
 
-                sent += 1
+                sent = 0
+                too_large = 0
 
-            if sent == 0:
-                bot.edit_message_text(
-                    "❌ Yuborishga mos media topilmadi "
-                    "yoki fayllar juda katta.",
-                    chat_id,
-                    status_id
-                )
-                return
+                for path in paths[:10]:
+                    size = os.path.getsize(path)
+                    ext = os.path.splitext(path)[1].lower()
 
-            bot.delete_message(chat_id, status_id)
+                    if size > 49 * 1024 * 1024:
+                        too_large += 1
+                        continue
 
-            # Ixtiyoriy avtomatik reklama
-            ad_text = os.environ.get("AD_TEXT", "").strip()
-            ad_url = os.environ.get("AD_URL", "").strip()
+                    with open(path, "rb") as media:
+                        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                            if size <= 9 * 1024 * 1024:
+                                bot.send_photo(chat_id, media)
+                            else:
+                                bot.send_document(
+                                    chat_id, media, timeout=90
+                                )
 
-            if ad_text and ad_url:
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton(
-                    "Reklamani ko‘rish", url=ad_url
-                ))
-                bot.send_message(
-                    chat_id, ad_text, reply_markup=kb
-                )
+                        elif ext in (".mp4", ".m4v", ".mov", ".webm"):
+                            bot.send_video(
+                                chat_id,
+                                media,
+                                supports_streaming=True,
+                                timeout=90
+                            )
+
+                    sent += 1
+
+                if sent == 0:
+                    bot.edit_message_text(
+                        "❌ Media topilmadi yoki fayl hajmi juda katta.",
+                        chat_id, status_id
+                    )
+                    return
+
+                bot.delete_message(chat_id, status_id)
+
+                ad_text = os.environ.get("AD_TEXT", "").strip()
+                ad_url = os.environ.get("AD_URL", "").strip()
+
+                if ad_text and ad_url:
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton(
+                        "Reklamani ko‘rish", url=ad_url
+                    ))
+                    bot.send_message(
+                        chat_id, ad_text, reply_markup=kb
+                    )
 
     except Exception:
         log.exception("Media yuklash/yuborish xatosi")
         try:
             bot.edit_message_text(
-                "❌ Yuklab bo‘lmadi. Ochiq Instagram "
-                "havolasini tekshiring. Ayrim postlar "
-                "login yoki Instagram cheklovlari sababli "
-                "yuklanmasligi mumkin.",
-                chat_id,
-                status_id
+                "❌ Yuklab bo‘lmadi.\n\n"
+                "Havola ochiq ekanini tekshiring. Instagram "
+                "cheklovlari yoki login talabi sababli ayrim "
+                "postlar yuklanmasligi mumkin.",
+                chat_id, status_id
             )
         except Exception:
             log.exception("Xato xabarini yuborib bo‘lmadi")
 
 
-# ---------- MESSAGE HANDLER ----------
+# ---------- MESSAGES ----------
 
 @bot.message_handler(
     content_types=[
@@ -460,17 +442,14 @@ def handle_message(message):
 
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton(
-            "✅ Hammaga yuborish",
-            callback_data="ad_confirm"
+            "✅ Hammaga yuborish", callback_data="ad_confirm"
         ))
         kb.add(types.InlineKeyboardButton(
-            "❌ Bekor qilish",
-            callback_data="ad_cancel"
+            "❌ Bekor qilish", callback_data="ad_cancel"
         ))
-
         bot.send_message(
             message.chat.id,
-            "Reklama xabari tayyor. Hammaga yuborilsinmi?",
+            "Reklama tayyor. Hammaga yuborilsin?",
             reply_markup=kb
         )
         return
@@ -482,12 +461,9 @@ def handle_message(message):
 
     if not re.match(
         r"^https?://(www\.)?(instagram\.com|instagr\.am)/",
-        url,
-        re.IGNORECASE
+        url, re.IGNORECASE
     ):
-        bot.reply_to(
-            message, "❗ Instagram havolasini yuboring."
-        )
+        bot.reply_to(message, "❗ Instagram havolasini yuboring.")
         return
 
     if not is_subscribed(message.from_user.id):
@@ -498,9 +474,7 @@ def handle_message(message):
         )
         return
 
-    status = bot.reply_to(
-        message, "⏳ Media yuklanmoqda..."
-    )
+    status = bot.reply_to(message, "⏳ Media yuklanmoqda...")
 
     threading.Thread(
         target=download_and_send,
@@ -509,7 +483,7 @@ def handle_message(message):
     ).start()
 
 
-# ---------- WEB SERVER ----------
+# ---------- WEBHOOK ----------
 
 @app.get("/")
 def home():
@@ -524,9 +498,8 @@ def health():
 @app.post("/telegram-webhook")
 def webhook():
     if (
-        request.headers.get(
-            "X-Telegram-Bot-Api-Secret-Token"
-        ) != WEBHOOK_SECRET
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        != WEBHOOK_SECRET
     ):
         abort(403)
 
@@ -534,16 +507,10 @@ def webhook():
         update = telebot.types.Update.de_json(
             request.get_data(as_text=True)
         )
-
-        log.info("Telegram update qabul qilindi")
         bot.process_new_updates([update])
-
         return "OK", 200
-
     except Exception:
-        log.exception(
-            "Webhook yoki xabarni qayta ishlash xatosi"
-        )
+        log.exception("Webhook xatosi")
         return "Webhook error", 500
 
 
@@ -552,7 +519,6 @@ if RENDER_URL:
         url=RENDER_URL + "/telegram-webhook",
         secret_token=WEBHOOK_SECRET
     )
-
     if result:
         log.info("Webhook sozlandi.")
     else:
