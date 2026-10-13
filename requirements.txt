@@ -1,5 +1,5 @@
 Flask
 gunicorn
 pyTelegramBotAPI
-yt-dlp
+yt-dlp[default,curl-cffi]
 gallery-dl
