@@ -1,5 +1,4 @@
-Flask
-gunicorn
 pyTelegramBotAPI
+flask
+gunicorn
 yt-dlp
-gallery-dl
