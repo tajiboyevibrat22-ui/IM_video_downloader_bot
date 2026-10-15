@@ -419,12 +419,28 @@ def download_photos_fallback(url, folder, opts):
     probe = dict(opts)
     probe["skip_download"] = True
 
+    # process=False: formatlar tekshirilmaydi, shuning uchun rasm
+    # elementlarida "No video formats found" xatosi chiqmaydi.
     with YoutubeDL(probe) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False, process=False)
+
+        if info and info.get("entries") is not None:
+            info = dict(info)
+            info["entries"] = list(info["entries"] or [])
 
     for i, entry in enumerate(get_entries(info), start=1):
+        if not isinstance(entry, dict):
+            continue
+
+        # Video elementlarni yt-dlp o'zi yuklaydi, ularni o'tkazib yuboramiz
+        if entry.get("formats"):
+            continue
+
         img_url = None
         direct = entry.get("url") or ""
+
+        if direct and not any(ext in direct.lower() for ext in IMAGE_EXT):
+            continue
 
         if any(ext in direct.lower() for ext in IMAGE_EXT):
             img_url = direct
@@ -485,16 +501,14 @@ def download_instagram(url, folder):
                 found.append(path)
         return sorted(found)
 
-    files = collect()
+    # Rasm elementlarni (yt-dlp o'tkazib yuborganlarini) har doim tekshiramiz,
+    # chunki karusel video va rasmdan iborat bo'lishi mumkin.
+    try:
+        download_photos_fallback(url, folder, options)
+    except Exception:
+        logger.exception("Rasm zaxira usuli ishlamadi.")
 
-    if not files:
-        try:
-            download_photos_fallback(url, folder, options)
-        except Exception:
-            logger.exception("Zaxira usul ham ishlamadi.")
-        files = collect()
-
-    return files
+    return collect()
 
 
 def send_downloaded_files(chat_id, files):
