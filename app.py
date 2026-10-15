@@ -1,10 +1,10 @@
 import os
-import re
 import json
 import time
 import sqlite3
 import logging
 import tempfile
+import urllib.request
 from pathlib import Path
 from threading import Lock
 from urllib.parse import urlparse
@@ -24,8 +24,16 @@ ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "").strip()
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
 DB_PATH = os.environ.get("DB_PATH", "/tmp/bot.db")
 
+# Instagram cookies (Netscape formatida, story uchun kerak)
+INSTAGRAM_COOKIES = os.environ.get("INSTAGRAM_COOKIES", "").strip()
+COOKIES_PATH = "/tmp/ig_cookies.txt"
+
 CHANNEL = "@Yangiyil_27"
 WEBHOOK_PATH = "/telegram-webhook"
+
+MAX_SIZE = 49 * 1024 * 1024
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp")
+VIDEO_EXT = (".mp4", ".m4v", ".mov")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN Render Environment Variables ichida yo'q.")
@@ -40,6 +48,16 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+HAS_COOKIES = False
+if INSTAGRAM_COOKIES:
+    try:
+        with open(COOKIES_PATH, "w", encoding="utf-8") as f:
+            f.write(INSTAGRAM_COOKIES + "\n")
+        HAS_COOKIES = True
+        logger.info("Instagram cookies yuklandi.")
+    except Exception:
+        logger.exception("Cookies faylini yozishda xato.")
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
@@ -114,12 +132,10 @@ init_db()
 
 def setup_commands():
     try:
-        # Oddiy foydalanuvchilar menyusida faqat /start
         bot.set_my_commands([
             types.BotCommand("start", "Botni ishga tushirish")
         ])
 
-        # Admin uchun qo'shimcha buyruqlar
         bot.set_my_commands(
             [
                 types.BotCommand("start", "Botni ishga tushirish"),
@@ -161,6 +177,10 @@ def is_instagram_url(text):
         return False
 
 
+def is_story_url(url):
+    return "/stories/" in url
+
+
 def check_subscription(user_id):
     try:
         member = bot.get_chat_member(CHANNEL, user_id)
@@ -191,9 +211,8 @@ def send_start_message(chat_id):
     bot.send_message(
         chat_id,
         "Salom! 👋\n\n"
-        "Instagram video, Reels, havolasini yuboring.\n\n"
-        "Eslatma: ayrim yopiq yoki login talab qiladigan postlar "
-        "yuklanmasligi mumkin."
+        "Instagram video, Reels, rasm yoki story havolasini yuboring.\n\n"
+        "Eslatma: yopiq akkaunt postlari yuklanmasligi mumkin."
     )
 
 
@@ -387,9 +406,55 @@ def broadcast_message(message):
 # INSTAGRAM YUKLASH
 # =========================
 
+def get_entries(info):
+    if not info:
+        return []
+    if info.get("entries"):
+        return [e for e in info["entries"] if e]
+    return [info]
+
+
+def download_photos_fallback(url, folder, opts):
+    """yt-dlp rasmni yuklay olmasa, rasm URL ni to'g'ridan-to'g'ri oladi."""
+    probe = dict(opts)
+    probe["skip_download"] = True
+
+    with YoutubeDL(probe) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    for i, entry in enumerate(get_entries(info), start=1):
+        img_url = None
+        direct = entry.get("url") or ""
+
+        if any(ext in direct.lower() for ext in IMAGE_EXT):
+            img_url = direct
+        elif entry.get("thumbnails"):
+            best = max(
+                entry["thumbnails"],
+                key=lambda t: (t.get("width") or 0) * (t.get("height") or 0)
+            )
+            img_url = best.get("url")
+        elif entry.get("thumbnail"):
+            img_url = entry["thumbnail"]
+
+        if not img_url:
+            continue
+
+        try:
+            target = os.path.join(folder, f"photo_{i}.jpg")
+            req = urllib.request.Request(
+                img_url, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp, \
+                    open(target, "wb") as out:
+                out.write(resp.read())
+        except Exception:
+            logger.exception("Rasmni to'g'ridan-to'g'ri yuklashda xato.")
+
+
 def download_instagram(url, folder):
     options = {
-        "outtmpl": os.path.join(folder, "%(title).80s_%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(folder, "%(id)s_%(autonumber)s.%(ext)s"),
         "format": "best",
         "noplaylist": False,
         "ignoreerrors": True,
@@ -397,62 +462,90 @@ def download_instagram(url, folder):
         "no_warnings": True,
         "retries": 2,
         "socket_timeout": 25,
-        "max_filesize": 49 * 1024 * 1024,
+        "max_filesize": MAX_SIZE,
     }
 
-    with YoutubeDL(options) as ydl:
-        ydl.download([url])
+    if HAS_COOKIES:
+        options["cookiefile"] = COOKIES_PATH
 
-    files = []
+    try:
+        with YoutubeDL(options) as ydl:
+            ydl.download([url])
+    except Exception:
+        logger.exception("yt-dlp yuklashda xato.")
 
-    for path in Path(folder).iterdir():
-        if not path.is_file():
-            continue
+    def collect():
+        found = []
+        for path in Path(folder).iterdir():
+            if (
+                path.is_file()
+                and path.suffix.lower() in IMAGE_EXT + VIDEO_EXT
+                and path.stat().st_size > 0
+            ):
+                found.append(path)
+        return sorted(found)
 
-        if path.suffix.lower() in (
-            ".mp4", ".m4v", ".mov",
-            ".jpg", ".jpeg", ".png", ".webp"
-        ):
-            if path.stat().st_size > 0:
-                files.append(path)
+    files = collect()
 
-    return sorted(files)
+    if not files:
+        try:
+            download_photos_fallback(url, folder, options)
+        except Exception:
+            logger.exception("Zaxira usul ham ishlamadi.")
+        files = collect()
+
+    return files
 
 
 def send_downloaded_files(chat_id, files):
     if not files:
         return False
 
-    for path in files:
-        try:
-            size = path.stat().st_size
+    photos = [p for p in files if p.suffix.lower() in IMAGE_EXT]
+    videos = [p for p in files if p.suffix.lower() in VIDEO_EXT]
 
-            if size > 49 * 1024 * 1024:
+    # Rasmlar: 10 tadan albom qilib yuboriladi
+    for i in range(0, len(photos), 10):
+        chunk = photos[i:i + 10]
+        try:
+            if len(chunk) == 1:
+                with open(chunk[0], "rb") as f:
+                    bot.send_photo(chat_id, f)
+            else:
+                media = []
+                for p in chunk:
+                    with open(p, "rb") as f:
+                        media.append(types.InputMediaPhoto(f.read()))
+                bot.send_media_group(chat_id, media)
+        except Exception:
+            logger.exception("Rasmlarni yuborishda xato.")
+            for p in chunk:
+                try:
+                    with open(p, "rb") as f:
+                        bot.send_document(chat_id, f)
+                except Exception:
+                    bot.send_message(
+                        chat_id, f"⚠️ {p.name} faylini yuborib bo'lmadi."
+                    )
+        time.sleep(0.5)
+
+    # Videolar: bittadan yuboriladi
+    for path in videos:
+        try:
+            if path.stat().st_size > MAX_SIZE:
                 bot.send_message(
-                    chat_id,
-                    f"⚠️ Fayl juda katta: {path.name}"
+                    chat_id, f"⚠️ Fayl juda katta: {path.name}"
                 )
                 continue
 
-            suffix = path.suffix.lower()
-
-            with open(path, "rb") as media:
-                if suffix in (".jpg", ".jpeg", ".png", ".webp"):
-                    bot.send_photo(chat_id, media)
-                elif suffix in (".mp4", ".m4v", ".mov"):
-                    bot.send_video(
-                        chat_id,
-                        media,
-                        supports_streaming=True
-                    )
+            with open(path, "rb") as f:
+                bot.send_video(chat_id, f, supports_streaming=True)
 
             time.sleep(0.3)
-
         except Exception:
-            logger.exception("Faylni Telegramga yuborishda xato.")
+            logger.exception("Videoni yuborishda xato.")
             bot.send_message(
-                chat_id,
-                f"⚠️ {path.name} faylini yuborib bo'lmadi."
+                chat_id, f"⚠️ {path.name} faylini yuborib bo'lmadi."
             )
 
     return True
@@ -480,6 +573,13 @@ def handle_instagram_link(message):
                 )
             return
 
+    if is_story_url(url) and not HAS_COOKIES:
+        bot.send_message(
+            chat_id,
+            "❌ Story yuklash hozircha sozlanmagan (login kerak)."
+        )
+        return
+
     status = bot.send_message(
         chat_id,
         "⏳ Media yuklanmoqda..."
@@ -495,9 +595,10 @@ def handle_instagram_link(message):
                     "Sabablari:\n"
                     "• Post yopiq bo'lishi mumkin.\n"
                     "• Instagram login talab qilishi mumkin.\n"
+                    "• Story muddati tugagan bo'lishi mumkin.\n"
                     "• Havola noto'g'ri yoki media mavjud emas.\n"
                     "• Instagram yuklab olishni cheklagan bo'lishi mumkin.\n\n"
-                    "Boshqa ochiq post havolasini sinab ko'ring.",
+                    "Boshqa havolani sinab ko'ring.",
                     chat_id=chat_id,
                     message_id=status.message_id
                 )
@@ -545,7 +646,7 @@ def text_handler(message):
     else:
         bot.reply_to(
             message,
-            "Instagram video, Reels havolasini yuboring."
+            "Instagram video, Reels, rasm yoki story havolasini yuboring."
         )
 
 
