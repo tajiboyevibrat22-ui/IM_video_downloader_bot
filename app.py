@@ -61,6 +61,9 @@ if INSTAGRAM_COOKIES:
     except Exception:
         logger.exception("Cookies faylini yozishda xato.")
 
+BOT_VERSION = "v4-embed-debug"
+logger.info("Bot versiyasi: %s", BOT_VERSION)
+
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
 
@@ -528,10 +531,13 @@ def download_photos_fallback(url, folder, opts):
     # yt-dlp hech narsa qaytarmasa (bitta rasmli postlarda odatiy holat),
     # rasmni embed sahifadan to'g'ridan-to'g'ri olamiz.
     if not entries:
+        logger.info("Embed usuli boshlandi.")
         embedded = embed_image_url(url)
+        logger.info("Embed natijasi: %s", (embedded or "YO'Q")[:120])
         if embedded:
             try:
-                save_image(embedded, os.path.join(folder, "photo_1.jpg"))
+                ok = save_image(embedded, os.path.join(folder, "photo_1.jpg"))
+                logger.info("Embed rasm saqlandi: %s", ok)
             except Exception:
                 logger.exception("Embed rasmini saqlashda xato.")
         return
