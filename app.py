@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import json
 import time
 import sqlite3
@@ -414,8 +416,72 @@ def get_entries(info):
     return [info]
 
 
+def best_image_url(entry):
+    """Eng yuqori sifatli rasm havolasini tanlaydi."""
+    cands = [t for t in (entry.get("thumbnails") or []) if t.get("url")]
+
+    if cands:
+        cands.sort(
+            key=lambda t: (
+                (t.get("width") or 0) * (t.get("height") or 0),
+                t.get("preference") or 0
+            )
+        )
+        best = cands[-1]
+        logger.info(
+            "Rasm variantlari: %s ta, tanlandi: %sx%s",
+            len(cands), best.get("width"), best.get("height")
+        )
+        return best["url"]
+
+    return entry.get("thumbnail")
+
+
+def embed_image_url(url):
+    """Bitta rasmli post uchun embed sahifadan to'liq rasmni oladi."""
+    match = re.search(
+        r"instagram\.com/(?:[^/]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
+        url
+    )
+    if not match:
+        return None
+
+    embed = f"https://www.instagram.com/p/{match.group(1)}/embed/captioned/"
+
+    try:
+        req = urllib.request.Request(
+            embed, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            page = resp.read().decode("utf-8", errors="ignore")
+
+        found = re.search(
+            r'class="EmbeddedMediaImage"[^>]*?src="([^"]+)"', page
+        )
+        if not found:
+            found = re.search(
+                r'src="([^"]+)"[^>]*?class="EmbeddedMediaImage"', page
+            )
+        if found:
+            return html.unescape(found.group(1))
+    except Exception:
+        logger.exception("Embed sahifadan rasm olishda xato.")
+
+    return None
+
+
+def save_image(img_url, target):
+    req = urllib.request.Request(
+        img_url, headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp, \
+            open(target, "wb") as out:
+        out.write(resp.read())
+    return os.path.getsize(target) > 0
+
+
 def download_photos_fallback(url, folder, opts):
-    """yt-dlp rasmni yuklay olmasa, rasm URL ni to'g'ridan-to'g'ri oladi."""
+    """yt-dlp rasmni yuklay olmasa, rasm havolasini o'zimiz olamiz."""
     probe = dict(opts)
     probe["skip_download"] = True
 
@@ -424,48 +490,48 @@ def download_photos_fallback(url, folder, opts):
     with YoutubeDL(probe) as ydl:
         info = ydl.extract_info(url, download=False, process=False)
 
-        if info and info.get("entries") is not None:
+        is_carousel = bool(info and info.get("entries") is not None)
+        if is_carousel:
             info = dict(info)
             info["entries"] = list(info["entries"] or [])
 
-    for i, entry in enumerate(get_entries(info), start=1):
+    entries = get_entries(info)
+    logger.info("Elementlar soni: %s, karusel: %s", len(entries), is_carousel)
+
+    for i, entry in enumerate(entries, start=1):
         if not isinstance(entry, dict):
             continue
 
-        # Video elementlarni yt-dlp o'zi yuklaydi, ularni o'tkazib yuboramiz
+        # Video elementlarni yt-dlp o'zi yuklaydi
         if entry.get("formats"):
             continue
 
-        img_url = None
         direct = entry.get("url") or ""
-
-        if direct and not any(ext in direct.lower() for ext in IMAGE_EXT):
+        if direct and not any(e in direct.lower() for e in IMAGE_EXT):
             continue
 
-        if any(ext in direct.lower() for ext in IMAGE_EXT):
-            img_url = direct
-        elif entry.get("thumbnails"):
-            best = max(
-                entry["thumbnails"],
-                key=lambda t: (t.get("width") or 0) * (t.get("height") or 0)
-            )
-            img_url = best.get("url")
-        elif entry.get("thumbnail"):
-            img_url = entry["thumbnail"]
+        target = os.path.join(folder, f"photo_{i}.jpg")
+        candidates = []
 
-        if not img_url:
-            continue
+        if any(e in direct.lower() for e in IMAGE_EXT):
+            candidates.append(direct)
 
-        try:
-            target = os.path.join(folder, f"photo_{i}.jpg")
-            req = urllib.request.Request(
-                img_url, headers={"User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(req, timeout=25) as resp, \
-                    open(target, "wb") as out:
-                out.write(resp.read())
-        except Exception:
-            logger.exception("Rasmni to'g'ridan-to'g'ri yuklashda xato.")
+        # Bitta rasmli postda embed sahifadagi rasm odatda sifatliroq
+        if not is_carousel:
+            embedded = embed_image_url(url)
+            if embedded:
+                candidates.insert(0, embedded)
+
+        best = best_image_url(entry)
+        if best:
+            candidates.append(best)
+
+        for img_url in candidates:
+            try:
+                if save_image(img_url, target):
+                    break
+            except Exception:
+                logger.exception("Rasmni yuklashda xato.")
 
 
 def download_instagram(url, folder):
