@@ -444,28 +444,49 @@ def embed_image_url(url):
         url
     )
     if not match:
+        logger.warning("Havoladan shortcode topilmadi: %s", url)
         return None
 
-    embed = f"https://www.instagram.com/p/{match.group(1)}/embed/captioned/"
+    code = match.group(1)
 
-    try:
-        req = urllib.request.Request(
-            embed, headers={"User-Agent": "Mozilla/5.0"}
-        )
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            page = resp.read().decode("utf-8", errors="ignore")
+    for suffix in ("embed/captioned/", "embed/"):
+        embed = f"https://www.instagram.com/p/{code}/{suffix}"
 
-        found = re.search(
-            r'class="EmbeddedMediaImage"[^>]*?src="([^"]+)"', page
-        )
-        if not found:
-            found = re.search(
-                r'src="([^"]+)"[^>]*?class="EmbeddedMediaImage"', page
+        try:
+            req = urllib.request.Request(
+                embed,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0 Safari/537.36"
+                    ),
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
             )
-        if found:
-            return html.unescape(found.group(1))
-    except Exception:
-        logger.exception("Embed sahifadan rasm olishda xato.")
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                page = resp.read().decode("utf-8", errors="ignore")
+
+            patterns = (
+                r'class="EmbeddedMediaImage"[^>]*?src="([^"]+)"',
+                r'src="([^"]+)"[^>]*?class="EmbeddedMediaImage"',
+                r'"display_url"\s*:\s*"([^"]+)"',
+                r'property="og:image"\s+content="([^"]+)"',
+            )
+
+            for pattern in patterns:
+                found = re.search(pattern, page)
+                if found:
+                    img = found.group(1)
+                    img = img.replace("\\u0026", "&").replace("\\/", "/")
+                    img = html.unescape(img)
+                    logger.info("Embed rasm topildi (%s).", suffix)
+                    return img
+
+            logger.warning("Embed sahifada rasm topilmadi (%s).", suffix)
+
+        except Exception:
+            logger.exception("Embed sahifani olishda xato (%s).", suffix)
 
     return None
 
@@ -487,16 +508,33 @@ def download_photos_fallback(url, folder, opts):
 
     # process=False: formatlar tekshirilmaydi, shuning uchun rasm
     # elementlarida "No video formats found" xatosi chiqmaydi.
-    with YoutubeDL(probe) as ydl:
-        info = ydl.extract_info(url, download=False, process=False)
+    info = None
+    is_carousel = False
 
-        is_carousel = bool(info and info.get("entries") is not None)
-        if is_carousel:
-            info = dict(info)
-            info["entries"] = list(info["entries"] or [])
+    try:
+        with YoutubeDL(probe) as ydl:
+            info = ydl.extract_info(url, download=False, process=False)
+
+            is_carousel = bool(info and info.get("entries") is not None)
+            if is_carousel:
+                info = dict(info)
+                info["entries"] = list(info["entries"] or [])
+    except Exception:
+        logger.exception("yt-dlp ma'lumot olishda xato.")
 
     entries = get_entries(info)
     logger.info("Elementlar soni: %s, karusel: %s", len(entries), is_carousel)
+
+    # yt-dlp hech narsa qaytarmasa (bitta rasmli postlarda odatiy holat),
+    # rasmni embed sahifadan to'g'ridan-to'g'ri olamiz.
+    if not entries:
+        embedded = embed_image_url(url)
+        if embedded:
+            try:
+                save_image(embedded, os.path.join(folder, "photo_1.jpg"))
+            except Exception:
+                logger.exception("Embed rasmini saqlashda xato.")
+        return
 
     for i, entry in enumerate(entries, start=1):
         if not isinstance(entry, dict):
